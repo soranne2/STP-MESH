@@ -1,4 +1,14 @@
-"""메시 파라미터 정의 및 프리셋 입출력."""
+"""메시 파라미터 정의 및 프리셋 입출력.
+
+버전 이력
+---------
+v1.2 (수정본)
+  - 출력 형식을 inp(Abaqus)와 k(LS-DYNA) 두 가지로 정리.
+  - surface 전용 STEP 지원을 위해 shell_default_thickness 추가.
+    solid이 없는 STEP은 두께 정보를 알 수 없으므로 이 값으로 SECTION을 쓴다.
+v1.0
+  - 최초 작성.
+"""
 from __future__ import annotations
 
 import json
@@ -47,6 +57,7 @@ class MeshConfig:
     shell_quad_dominant: bool = True   # quad-dominant (S4R 위주)
     shell_imprint: bool = True         # mid-surface 패치끼리 imprint하여 절점 공유
     shell_fallback_offset: bool = True  # 면쌍 실패 시 최대면 오프셋으로 대체
+    shell_default_thickness: float = 1.0  # surface 전용 STEP에서 쓸 기본 판 두께
 
     # ---------------- tetra (사출) ----------------
     tet_min_size_factor: float = 0.25  # 최소 크기 = element_size × factor
@@ -60,7 +71,7 @@ class MeshConfig:
     hex_full_quad: bool = True      # blossom full-quad로 100% hexa 유도
 
     # ---------------- 출력 ----------------
-    export_formats: List[str] = field(default_factory=lambda: ["inp"])
+    export_formats: List[str] = field(default_factory=lambda: ["inp"])  # inp / k
     write_sections: bool = True     # shell 두께를 *SHELL SECTION으로 함께 출력
     quality_metric: str = "minSICN"  # 품질 리포트 지표
     quality_warn: float = 0.3       # 이 값 미만이면 경고 카운트
