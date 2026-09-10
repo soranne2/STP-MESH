@@ -4,6 +4,13 @@
 곡률 기반 크기 제어 + 홀 주변 국부 세밀화를 조합한다.
 tetra에는 정렬 washer 링을 만들 수 없어 홀 처리는
 '원주 노드 8개 고정 + washer 폭 안쪽 크기 유지'로 구현한다.
+
+버전 이력
+---------
+v1.3 (수정본)
+  - 메시 생성을 generate_mesh()로 통일 (재조합 실패 자동 복구).
+v1.0
+  - 최초 작성.
 """
 from __future__ import annotations
 
@@ -33,7 +40,7 @@ def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, float]:
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", cfg.tet_curvature_nodes)
 
     log(f"  tetra 생성 (size {cfg.element_size}, min {cfg.min_size():.2f})")
-    gmsh.model.mesh.generate(3)
+    g.generate_mesh(3, log)
 
     if cfg.optimize:
         gmsh.model.mesh.optimize("Netgen")
