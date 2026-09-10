@@ -1,6 +1,17 @@
 """STEP 로딩, 형상 지표 계산, 파트 자동 분류, 홀 검출.
 
 gmsh OCC 커널의 조회 API만 사용하므로 별도 CAD 라이브러리가 필요 없다.
+
+버전 이력
+---------
+v1.1 (수정본)
+  - "signal only works in main thread of the main interpreter" 오류 수정.
+    gmsh.initialize()가 SIGINT 핸들러를 등록하는데 파이썬은 메인 스레드가
+    아니면 이를 금지한다. 메시 작업은 GUI 워커 스레드에서 돌기 때문에
+    interruptible=False로 초기화하도록 바꿨다.
+    해당 인자가 없는 구버전 gmsh를 위해 TypeError 폴백을 둔다.
+v1.0
+  - 최초 작성.
 """
 from __future__ import annotations
 
@@ -57,7 +68,11 @@ def perp_basis(n: Sequence[float]) -> Tuple[Vec, Vec]:
 # ------------------------------------------------------------------ 세션 관리
 def start(verbose: bool = False, term: bool = False) -> None:
     if not gmsh.isInitialized():
-        gmsh.initialize()
+        # 워커 스레드에서 돌기 때문에 gmsh의 SIGINT 핸들러 등록을 꺼야 한다
+        try:
+            gmsh.initialize(interruptible=False)
+        except TypeError:
+            gmsh.initialize()   # interruptible 인자가 없는 구버전
     gmsh.option.setNumber("General.Terminal", 1 if term else 0)
     gmsh.option.setNumber("General.Verbosity", 5 if verbose else 1)
     gmsh.clear()
