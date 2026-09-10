@@ -4,6 +4,12 @@ gmsh OCC 커널의 조회 API만 사용하므로 별도 CAD 라이브러리가 �
 
 버전 이력
 ---------
+v1.3 (수정본)
+  - 겉면 surface만 있는 STEP을 sew/heal해서 solid로 복원 (auto_make_solid).
+    OCCSewFaces / OCCMakeSolids 옵션을 import 전에 켜고, 그래도 solid이
+    안 생기면 occ.healShapes()로 한 번 더 시도한다.
+  - "Full-quad recombination not ready yet for periodic surfaces" 대응.
+    generate_mesh()가 재조합 실패를 잡아 blossom(1)으로 자동 재시도한다.
 v1.2 (수정본)
   - solid이 없는 surface 전용 STEP도 처리할 수 있도록 load_step이 surface
     태그까지 함께 돌려주도록 변경 (load_shapes).
@@ -93,8 +99,27 @@ def load_step(path: str, cfg: MeshConfig, log: Logger) -> List[int]:
     """STEP을 읽고 solid 태그 리스트를 반환."""
     gmsh.option.setNumber("Geometry.OCCImportLabels", 1)
     gmsh.option.setNumber("Geometry.Tolerance", 1e-6)
+    if cfg.auto_make_solid:
+        # 겉면만 있는 STEP을 읽을 때 면을 꿰매어 닫힌 solid로 만든다
+        gmsh.option.setNumber("Geometry.OCCSewFaces", 1)
+        gmsh.option.setNumber("Geometry.OCCMakeSolids", 1)
+        gmsh.option.setNumber("Geometry.OCCFixDegenerated", 1)
+        gmsh.option.setNumber("Geometry.OCCFixSmallEdges", 1)
+        gmsh.option.setNumber("Geometry.OCCFixSmallFaces", 1)
     gmsh.model.occ.importShapes(path)
     gmsh.model.occ.synchronize()
+
+    if cfg.auto_make_solid and not gmsh.model.getEntities(3):
+        # import 옵션으로 안 되면 heal을 한 번 더 돌린다
+        try:
+            gmsh.model.occ.healShapes(
+                tolerance=cfg.heal_tolerance, fixDegenerated=True,
+                fixSmallEdges=True, fixSmallFaces=True,
+                sewFaces=True, makeSolids=True,
+            )
+            gmsh.model.occ.synchronize()
+        except Exception as exc:
+            log(f"  [경고] solid 복원(heal) 실패: {exc}")
 
     if abs(cfg.scale - 1.0) > 1e-9:
         gmsh.model.occ.dilate(gmsh.model.getEntities(), 0, 0, 0,
@@ -123,6 +148,26 @@ def load_shapes(path: str, cfg: MeshConfig, log: Logger) -> Tuple[List[int], Lis
 
 
 # ------------------------------------------------------------------ 면/솔리드 정보
+def generate_mesh(dim: int, log: Logger) -> None:
+    """메시 생성. full-quad 재조합이 실패하면 blossom으로 자동 재시도한다.
+
+    원통면처럼 주기적(periodic)인 면에서는 gmsh의 full-quad 재조합
+    (RecombinationAlgorithm 2, 3)이 아직 동작하지 않는다.
+    """
+    try:
+        gmsh.model.mesh.generate(dim)
+        return
+    except Exception as exc:
+        msg = str(exc)
+        low = msg.lower()
+        if "recombination" not in low and "periodic" not in low:
+            raise
+        log(f"  [경고] full-quad 재조합 불가 — blossom으로 재시도 ({msg.strip()[:70]})")
+    gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 1)
+    gmsh.model.mesh.clear()
+    gmsh.model.mesh.generate(dim)
+
+
 def face_normal(tag: int) -> Vec:
     """면 파라미터 중앙에서의 법선(외향)."""
     b = gmsh.model.getParametrizationBounds(2, tag)
