@@ -2,6 +2,13 @@
 
 버전 이력
 ---------
+v1.4 (수정본)
+  - [전체 적용]에서 AttributeError: 'str' object has no attribute 'label' 수정.
+    PartType이 str Enum이라 QComboBox.currentData()가 평범한 str을 돌려준다.
+    콤보에서 읽은 값은 전부 PartType.coerce()로 정규화한다. 같은 원인으로
+    압출을 골라도 tetra가 돌던 문제도 함께 해결된다.
+  - 진행 표시 개선: 처리 중에는 진행 바가 계속 움직이고, 상태줄에 경과
+    시간이 초 단위로 올라간다. 파트별 소요 시간도 로그에 남는다.
 v1.3 (수정본)
   - 공통 항목에 '면 봉합으로 solid 복원'과 '봉합 허용오차' 추가.
     겉면만 있는 STEP을 solid로 되살려 압출/사출 메시를 적용하기 위한 옵션.
@@ -17,13 +24,14 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 import subprocess
 import sys
 from dataclasses import fields as dc_fields
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
@@ -143,6 +151,12 @@ class MainWindow(QMainWindow):
         self.thread: QThread | None = None
         self.worker: Worker | None = None
         self.results: List[Result] = []
+        self.started_at: float = 0.0
+        self.done_count: int = 0
+        self.total_count: int = 0
+        self.tick = QTimer(self)
+        self.tick.setInterval(500)
+        self.tick.timeout.connect(self._update_elapsed)
         self._build()
         self._push_config()
 
@@ -390,13 +404,15 @@ class MainWindow(QMainWindow):
 
     def _bulk_type(self) -> None:
         """[전체 적용] 버튼: 목록의 모든 행을 선택한 유형으로 바꾼다."""
-        target = self.bulk.currentData()
-        if target is None or self.table.rowCount() == 0:
+        if self.table.rowCount() == 0:
             return
+        # PartType은 str Enum이라 Qt를 거치면 평범한 str로 돌아온다
+        target = PartType.coerce(self.bulk.currentData())
+        idx = self.bulk.currentIndex()
         for r in range(self.table.rowCount()):
             combo = self.table.cellWidget(r, 1)
             if isinstance(combo, QComboBox):
-                combo.setCurrentIndex(combo.findData(target))
+                combo.setCurrentIndex(idx)
         self.append_log(f"전체 {self.table.rowCount()}개 파트를 "
                         f"'{target.label}'으로 변경")
 
@@ -466,7 +482,8 @@ class MainWindow(QMainWindow):
         for r in range(self.table.rowCount()):
             path = self.table.item(r, 0).data(Qt.UserRole)
             combo = self.table.cellWidget(r, 1)
-            items.append((path, combo.currentData() if combo else PartType.AUTO))
+            ptype = PartType.coerce(combo.currentData()) if combo else PartType.AUTO
+            items.append((path, ptype))
         return items
 
     def start_run(self) -> None:
@@ -480,11 +497,16 @@ class MainWindow(QMainWindow):
         for r in range(self.table.rowCount()):
             self.table.setItem(r, 2, QTableWidgetItem("진행"))
         self.log.clear()
-        self.bar.setValue(0)
+        # 파트 하나에도 수십 초가 걸리므로 진행 바는 계속 움직이게 둔다
+        self.bar.setRange(0, 0)
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.view_btn.setEnabled(False)
-        self.status.setText(f"{len(items)}개 파트 처리 중")
+        self.started_at = time.perf_counter()
+        self.done_count = 0
+        self.total_count = len(items)
+        self.tick.start()
+        self._update_elapsed()
 
         self.thread = QThread(self)
         self.worker = Worker(items, cfg, outdir)
@@ -500,12 +522,25 @@ class MainWindow(QMainWindow):
     def stop_run(self) -> None:
         if self.worker:
             self.worker.stop()
+            self.tick.stop()
             self.status.setText("중단 요청 — 현재 파트까지 마무리합니다")
 
+    def _fmt_elapsed(self) -> str:
+        s = int(time.perf_counter() - self.started_at)
+        return f"{s // 60}분 {s % 60}초" if s >= 60 else f"{s}초"
+
+    def _update_elapsed(self) -> None:
+        self.status.setText(
+            f"처리 중 {self.done_count}/{self.total_count} · 경과 {self._fmt_elapsed()}"
+        )
+
     def on_progress(self, done: int, total: int) -> None:
-        self.bar.setValue(int(100 * done / max(total, 1)))
+        self.done_count, self.total_count = done, total
+        self._update_elapsed()
 
     def on_finished(self, results: List[Result]) -> None:
+        self.tick.stop()
+        self.bar.setRange(0, 100)
         self.results = results
         by_source: Dict[str, List[Result]] = {}
         for r in results:
@@ -531,7 +566,9 @@ class MainWindow(QMainWindow):
         for r in results:
             self.append_log("  " + r.summary())
         self.bar.setValue(100)
-        self.status.setText(f"완료 — 성공 {ok} / 전체 {len(results)}")
+        self.status.setText(
+            f"완료 — 성공 {ok} / 전체 {len(results)} · 총 {self._fmt_elapsed()}"
+        )
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.view_btn.setEnabled(any(r.files for r in results))
