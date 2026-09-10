@@ -12,9 +12,17 @@ mid-surface는 면쌍 추출 + 벤딩부 연장 + 자동 봉합까지 한 번에
 
 버전 이력
 ---------
+v1.3 (수정본)
+  - surface 전용 STEP에서도 두께를 실측한다. 면쌍 탐색을 solid이 아니라
+    면 목록에 대해 수행하도록 바꿔, 겉면만 있는 모델도 마주보는 면 간
+    거리로 판 두께를 잰다. shell_default_thickness는 면쌍을 하나도 못
+    찾았을 때의 최후 수단으로만 쓰인다.
+  - Mesh.RecombinationAlgorithm을 full-quad(2)에서 blossom(1)로 변경.
+    원통면 등 주기적 면에서 "Full-quad recombination not ready yet for
+    periodic surfaces" 예외가 나던 원인이다. 생성은 generate_mesh()를 통해
+    호출해 남은 재조합 실패도 자동 복구한다.
 v1.2 (수정본)
   - solid이 없는 surface 전용 STEP을 그대로 shell 메시하는 mesh_surfaces() 추가.
-    ANSA/설계팀 mid-surface STEP이 여기에 해당한다.
   - 2D 메시 생성 부분을 _mesh_2d()로 분리해 solid 경로와 공유.
   - washer로 면이 쪼개져도 두께 그룹이 유지되도록 setup_holes에 meta 전달.
 v1.0
@@ -24,7 +32,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Sequence, Tuple
 
 import gmsh
 
@@ -41,9 +49,12 @@ class FacePair:
     thickness: float
 
 
-def find_face_pairs(info: g.SolidInfo, cfg: MeshConfig) -> List[FacePair]:
-    """마주보는 평면 쌍(외향 법선이 반대, 거리 = 판 두께)을 찾는다."""
-    planar = [f for f in info.faces if g.is_planar(f)]
+def find_face_pairs(faces: Sequence[int], cfg: MeshConfig) -> List[FacePair]:
+    """마주보는 평면 쌍(법선이 반대, 거리 = 판 두께)을 찾는다.
+
+    solid의 경계면이든 STEP에 그냥 들어있는 면이든 동일하게 동작한다.
+    """
+    planar = [f for f in faces if g.is_planar(f)]
     cache = {f: (g.face_normal(f), g.face_center(f), g.face_area(f)) for f in planar}
     pairs: List[FacePair] = []
     used: set[int] = set()
@@ -59,7 +70,7 @@ def find_face_pairs(info: g.SolidInfo, cfg: MeshConfig) -> List[FacePair]:
             if b == a or b in used:
                 continue
             nb, cb, ab = cache[b]
-            if g.dot(na, nb) > -0.995:
+            if abs(g.dot(na, nb)) < 0.995:      # 평행(같은 방향/반대 방향 모두 허용)
                 continue
             if abs(aa - ab) / max(aa, ab) > cfg.shell_area_tol:
                 continue
@@ -79,60 +90,42 @@ def find_face_pairs(info: g.SolidInfo, cfg: MeshConfig) -> List[FacePair]:
     return pairs
 
 
-def build_midsurface(info: g.SolidInfo, cfg: MeshConfig,
-                     log: Logger) -> Tuple[List[int], Dict[int, float]]:
-    """면쌍마다 t/2 오프셋 패치를 만들고 (면 태그 목록, 면->두께) 를 반환."""
-    pairs = find_face_pairs(info, cfg)
-    if not pairs:
-        if not cfg.shell_fallback_offset:
-            raise RuntimeError("mid-surface 면쌍을 찾지 못했습니다")
-        biggest = max(info.faces, key=g.face_area)
-        pairs = [FacePair(biggest, biggest, info.eq_thickness)]
-        log(f"  면쌍 실패 — 최대면 단독 오프셋으로 대체 (t={info.eq_thickness:.2f})")
-    else:
-        ts = sorted({round(p.thickness, 2) for p in pairs})
-        log(f"  면쌍 {len(pairs)}쌍, 두께 {ts}")
+def _keep_only(keep: Sequence[int]) -> None:
+    """지정한 surface만 남기고 나머지 형상을 모델에서 제거한다."""
+    keep_set = set(keep)
+    for _, t in list(gmsh.model.getEntities(3)):
+        try:
+            gmsh.model.occ.remove([(3, t)], recursive=False)
+        except Exception:
+            pass
+    gmsh.model.occ.synchronize()
+    for _, t in list(gmsh.model.getEntities(2)):
+        if t in keep_set:
+            continue
+        try:
+            gmsh.model.occ.remove([(2, t)], recursive=False)
+        except Exception:
+            pass
+    gmsh.model.occ.synchronize()
 
+
+def offset_pairs(pairs: Sequence[FacePair], log: Logger) -> Tuple[List[int], Dict[int, float]]:
+    """각 면쌍의 한쪽 면을 t/2만큼 안쪽으로 옮겨 mid-surface 패치를 만든다."""
     mid_tags: List[int] = []
     thickness: Dict[int, float] = {}
     for p in pairs:
         n = g.face_normal(p.a)
+        cb = g.face_center(p.b)
+        ca = g.face_center(p.a)
+        # 짝이 되는 면 쪽(재료 안쪽)으로 절반만큼 이동
+        direction = 1.0 if g.dot(g.sub(cb, ca), n) > 0 else -1.0
         copied = gmsh.model.occ.copy([(2, p.a)])
-        # 외향 법선의 반대(재료 안쪽)로 t/2 이동
-        gmsh.model.occ.translate(copied, *g.scale(n, -p.thickness / 2.0))
+        gmsh.model.occ.translate(copied, *g.scale(n, direction * p.thickness / 2.0))
         for _, t in copied:
             mid_tags.append(t)
             thickness[t] = p.thickness
     gmsh.model.occ.synchronize()
-
-    # 원본 solid는 제거해서 메시 대상에서 뺀다
-    gmsh.model.occ.remove([(3, info.tag)], recursive=False)
-    gmsh.model.occ.synchronize()
-    for dim in (3, 2, 1, 0):
-        for d, t in gmsh.model.getEntities(dim):
-            if d == 2 and t in thickness:
-                continue
-            if d == 2:
-                gmsh.model.occ.remove([(d, t)], recursive=False)
-    gmsh.model.occ.synchronize()
-
-    if cfg.shell_imprint:
-        mid_tags, thickness = imprint_patches(mid_tags, thickness, log)
-
     return mid_tags, thickness
-
-
-def report_free_edges(log: Logger) -> int:
-    """한 면에만 붙은 엣지 수 = 패치 사이 미봉합 구간의 지표."""
-    count: Dict[int, int] = {}
-    for _, s in gmsh.model.getEntities(2):
-        for _, c in gmsh.model.getBoundary([(2, s)], combined=False, oriented=False):
-            c = abs(c)
-            count[c] = count.get(c, 0) + 1
-    free = sum(1 for v in count.values() if v == 1)
-    if free:
-        log(f"  free edge {free}개 — 벤딩부 등 미봉합 구간일 수 있음 (확인 필요)")
-    return free
 
 
 def imprint_patches(tags: List[int], thickness: Dict[int, float],
@@ -158,6 +151,19 @@ def imprint_patches(tags: List[int], thickness: Dict[int, float],
     return tags, thickness
 
 
+def report_free_edges(log: Logger) -> int:
+    """한 면에만 붙은 엣지 수 = 패치 사이 미봉합 구간의 지표."""
+    count: Dict[int, int] = {}
+    for _, s in gmsh.model.getEntities(2):
+        for _, c in gmsh.model.getBoundary([(2, s)], combined=False, oriented=False):
+            c = abs(c)
+            count[c] = count.get(c, 0) + 1
+    free = sum(1 for v in count.values() if v == 1)
+    if free:
+        log(f"  free edge {free}개 — 벤딩부 등 미봉합 구간일 수 있음 (확인 필요)")
+    return free
+
+
 def _mesh_2d(tags: List[int], thickness: Dict[int, float],
              cfg: MeshConfig, log: Logger) -> Dict[str, object]:
     """홀/washer 처리 후 2D 메시를 만들고 두께별 물리 그룹을 붙인다."""
@@ -175,11 +181,12 @@ def _mesh_2d(tags: List[int], thickness: Dict[int, float],
     if cfg.shell_quad_dominant:
         gmsh.option.setNumber("Mesh.Algorithm", 8)          # Frontal-Delaunay for quads
         gmsh.option.setNumber("Mesh.RecombineAll", 1)
-        gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)
+        # 1 = blossom. 2/3(full-quad)은 원통 등 주기적 면에서 예외를 던진다.
+        gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 1)
     else:
         gmsh.option.setNumber("Mesh.Algorithm", 6)
 
-    gmsh.model.mesh.generate(2)
+    g.generate_mesh(2, log)
     if cfg.optimize:
         gmsh.model.mesh.optimize("Laplace2D")
     if cfg.second_order:
@@ -202,21 +209,47 @@ def _mesh_2d(tags: List[int], thickness: Dict[int, float],
 
 def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, object]:
     """solid에서 mid-surface를 뽑아 shell 메시."""
-    mid_tags, thickness = build_midsurface(info, cfg, log)
+    pairs = find_face_pairs(info.faces, cfg)
+    if pairs:
+        ts = sorted({round(p.thickness, 2) for p in pairs})
+        log(f"  면쌍 {len(pairs)}쌍, 두께 {ts}")
+    else:
+        if not cfg.shell_fallback_offset:
+            raise RuntimeError("mid-surface 면쌍을 찾지 못했습니다")
+        biggest = max(info.faces, key=g.face_area)
+        pairs = [FacePair(biggest, biggest, info.eq_thickness)]
+        log(f"  면쌍 실패 — 최대면 단독 오프셋으로 대체 (t={info.eq_thickness:.2f})")
+
+    mid_tags, thickness = offset_pairs(pairs, log)
+    _keep_only(mid_tags)
+    if cfg.shell_imprint:
+        mid_tags, thickness = imprint_patches(mid_tags, thickness, log)
     return _mesh_2d(mid_tags, thickness, cfg, log)
 
 
 def mesh_surfaces(surface_tags: List[int], cfg: MeshConfig,
                   log: Logger) -> Dict[str, object]:
-    """surface 전용 STEP: 들어온 면 자체를 mid-surface로 보고 shell 메시.
+    """solid 없이 면만 있는 STEP을 shell 메시.
 
-    두께 정보가 파일에 없으므로 shell_default_thickness를 쓴다.
-    해석 전에 *SHELL SECTION의 두께 값만 실제 판 두께로 바꿔주면 된다.
+    먼저 마주보는 면쌍을 찾아 실제 판 두께를 재고 mid-surface를 만든다.
+    겉면만 있는 모델이라도 상하면이 짝지어지면 두께가 그대로 나온다.
+    면쌍을 하나도 못 찾으면 들어온 면을 그대로 쓰고
+    shell_default_thickness를 두께로 가정한다.
     """
-    t0 = cfg.shell_default_thickness
-    log(f"  surface {len(surface_tags)}개를 mid-surface로 사용 (두께 {t0} 가정)")
-    thickness: Dict[int, float] = {t: t0 for t in surface_tags}
-    tags = list(surface_tags)
+    pairs = find_face_pairs(surface_tags, cfg)
+    if pairs:
+        ts = sorted({round(p.thickness, 2) for p in pairs})
+        log(f"  면쌍 {len(pairs)}쌍에서 두께 실측 — {ts}")
+        mid_tags, thickness = offset_pairs(pairs, log)
+        _keep_only(mid_tags)
+    else:
+        t0 = cfg.shell_default_thickness
+        log(f"  면쌍을 찾지 못함 — 입력 면을 그대로 사용, 두께 {t0} 가정")
+        log("   (실제 두께를 넣으려면 '기본 판 두께' 값을 바꾸거나 "
+            "'면쌍 최대 두께'를 키워보세요)")
+        mid_tags = list(surface_tags)
+        thickness = {t: t0 for t in mid_tags}
+
     if cfg.shell_imprint:
-        tags, thickness = imprint_patches(tags, thickness, log)
-    return _mesh_2d(tags, thickness, cfg, log)
+        mid_tags, thickness = imprint_patches(mid_tags, thickness, log)
+    return _mesh_2d(mid_tags, thickness, cfg, log)
