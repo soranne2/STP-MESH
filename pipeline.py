@@ -1,4 +1,13 @@
-"""파일 하나를 받아 분류 -> 메시 -> 품질확인 -> 저장까지 수행."""
+"""파일 하나를 받아 분류 -> 메시 -> 품질확인 -> 저장까지 수행.
+
+버전 이력
+---------
+v1.2 (수정본)
+  - solid이 없는 surface 전용 STEP을 실패 처리하던 것을 고쳐, 들어온 면을
+    그대로 mid-surface로 보고 shell 메시하도록 분기 추가.
+v1.0
+  - 최초 작성.
+"""
 from __future__ import annotations
 
 import traceback
@@ -94,19 +103,21 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
     out_root.mkdir(parents=True, exist_ok=True)
     results: List[Result] = []
 
-    # 1차 로드: solid 개수 파악
+    # 1차 로드: solid / surface 개수 파악
     g.start()
     try:
-        solids = g.load_step(str(src), cfg, log)
+        solids, surfaces = g.load_shapes(str(src), cfg, log)
     except Exception as exc:
         g.stop()
         return [Result(str(src), src.stem, requested, error=f"STEP 로드 실패: {exc}")]
-    n_solids = len(solids)
+    n_solids, n_surfaces = len(solids), len(surfaces)
     g.stop()
 
     if n_solids == 0:
-        return [Result(str(src), src.stem, requested,
-                       error="solid이 없습니다 (surface 전용 STEP은 미지원)")]
+        if n_surfaces == 0:
+            return [Result(str(src), src.stem, requested,
+                           error="STEP 안에 solid도 surface도 없습니다")]
+        return [_run_surface_only(src, cfg, out_root, log)]
 
     for idx, solid in enumerate(solids, start=1):
         name = src.stem if n_solids == 1 else f"{src.stem}_p{idx:02d}"
@@ -151,6 +162,37 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
         results.append(res)
 
     return results
+
+
+def _run_surface_only(src: Path, cfg: MeshConfig, out_root: Path,
+                      log: Logger) -> Result:
+    """solid 없이 면만 들어있는 STEP (mid-surface STEP) 처리."""
+    name = src.stem
+    res = Result(str(src), name, PartType.PRESS,
+                 reason="solid 없음 — 입력 surface를 mid-surface로 사용")
+    log(f"[{name}] surface 전용 STEP — shell 메시로 처리")
+    try:
+        g.start()
+        _, surfaces = g.load_shapes(str(src), cfg, lambda _m: None)
+        extra = shell.mesh_surfaces(surfaces, cfg, log)
+        res.extra = extra
+
+        node_tags, _, _ = gmsh.model.mesh.getNodes()
+        res.nodes = len(node_tags)
+        res.elements = _count_elements()
+        res.quality_min, res.quality_avg, res.quality_bad = _quality(cfg)
+
+        groups = extra.get("thickness_groups") or {}
+        res.files = exporter.write(out_root / name, cfg, PartType.PRESS,
+                                   groups if isinstance(groups, dict) else {}, log)
+        log(f"  완료 — {res.summary()}")
+    except Exception as exc:
+        res.error = str(exc)
+        log(f"  [오류] {exc}")
+        log(traceback.format_exc(limit=3))
+    finally:
+        g.stop()
+    return res
 
 
 def run_batch(items: List[tuple[str, PartType]], cfg: MeshConfig, outdir: str,
