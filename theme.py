@@ -1,4 +1,15 @@
-"""블랙 + 토스블루 톤 스타일시트."""
+"""블랙 + 토스블루 톤 스타일시트.
+
+버전 이력
+---------
+v1.1 (수정본)
+  - QScrollArea 안쪽 컨테이너 위젯과 QSplitter에 배경이 적용되지 않아
+    파라미터 패널(공통 / 프레스 / 사출 / 압출) 뒤로 흰 바탕이 비치던 문제 수정.
+    QScrollArea의 자식 위젯, QSplitter, splitter handle까지 투명 처리하고
+    QMainWindow 자체 배경색을 지정했다.
+v1.0
+  - 최초 작성.
+"""
 
 C = {
     "bg":        "#0D0D0F",
@@ -134,7 +145,14 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{ background: {C['blue']}; border-radius: 4px; }}
 
-QScrollArea {{ background: transparent; border: none; }}
+QMainWindow {{ background: {C['bg']}; }}
+QScrollArea,
+QScrollArea > QWidget,
+QScrollArea > QWidget > QWidget,
+QSplitter,
+QSplitter > QWidget {{ background: transparent; border: none; }}
+QSplitter::handle {{ background: transparent; }}
+QSplitter::handle:horizontal {{ width: 14px; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px; }}
 QScrollBar::handle:vertical {{ background: #33333B; border-radius: 5px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: #43434D; }}
