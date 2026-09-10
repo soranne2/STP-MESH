@@ -2,6 +2,8 @@
 
 버전 이력
 ---------
+v1.5 (수정본)
+  - 파라미터 패널이 탭으로 바뀌면서 QTabWidget / QTabBar 스타일 추가.
 v1.1 (수정본)
   - QScrollArea 안쪽 컨테이너 위젯과 QSplitter에 배경이 적용되지 않아
     파라미터 패널(공통 / 프레스 / 사출 / 압출) 뒤로 흰 바탕이 비치던 문제 수정.
@@ -158,6 +160,30 @@ QScrollBar::handle:vertical {{ background: #33333B; border-radius: 5px; min-heig
 QScrollBar::handle:vertical:hover {{ background: #43434D; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+
+QTabWidget::pane {{
+    background: {C['surface']};
+    border: 1px solid {C['border']};
+    border-radius: 14px;
+    top: -1px;
+}}
+QTabBar {{ qproperty-drawBase: 0; }}
+QTabBar::tab {{
+    background: transparent;
+    color: {C['muted']};
+    border: none;
+    padding: 9px 16px;
+    margin-right: 4px;
+    border-radius: 9px;
+    font-size: 12px;
+    font-weight: 500;
+}}
+QTabBar::tab:hover {{ color: {C['text']}; background: {C['raised']}; }}
+QTabBar::tab:selected {{
+    color: #FFFFFF;
+    background: {C['blue']};
+    font-weight: 600;
+}}
 
 QToolTip {{
     background: {C['raised']};
