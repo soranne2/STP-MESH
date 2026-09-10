@@ -2,19 +2,23 @@
 
 버전 이력
 ---------
+v1.5 (수정본)
+  - 오른쪽 파라미터 패널을 스크롤에서 탭(공통 / 프레스 / 사출 / 압출 / 옵션)으로 변경.
+  - 프리셋 기본 위치를 프로그램 폴더 아래 presets/ 로 고정. 종료할 때
+    presets/last.json에 자동 저장하고 다음 실행에서 자동으로 불러온다.
+    저장/불러오기 대화상자도 이 폴더에서 시작한다.
+  - 진행 바가 파일 단위가 아니라 단계 단위로 올라간다. 상태줄에 현재 단계와
+    경과 시간을 함께 보여준다.
 v1.4 (수정본)
   - [전체 적용]에서 AttributeError: 'str' object has no attribute 'label' 수정.
     PartType이 str Enum이라 QComboBox.currentData()가 평범한 str을 돌려준다.
     콤보에서 읽은 값은 전부 PartType.coerce()로 정규화한다. 같은 원인으로
     압출을 골라도 tetra가 돌던 문제도 함께 해결된다.
-  - 진행 표시 개선: 처리 중에는 진행 바가 계속 움직이고, 상태줄에 경과
-    시간이 초 단위로 올라간다. 파트별 소요 시간도 로그에 남는다.
+  - 진행 표시 개선: 경과 시간 표시, 파트별 소요 시간 로그.
 v1.3 (수정본)
   - 공통 항목에 '면 봉합으로 solid 복원'과 '봉합 허용오차' 추가.
-    겉면만 있는 STEP을 solid로 되살려 압출/사출 메시를 적용하기 위한 옵션.
 v1.2 (수정본)
-  - "일괄 유형 변경"이 목록을 고르는 순간 바로 적용되던 것을 고침.
-    이제 유형을 고른 뒤 [전체 적용] 버튼을 눌러야 반영된다.
+  - '일괄 유형 변경'을 [전체 적용] 버튼 방식으로 변경.
   - 출력 형식을 inp(Abaqus)와 k(LS-DYNA) 두 가지로 정리.
   - surface 전용 STEP에서 쓸 기본 판 두께 입력란 추가.
 v1.0
@@ -24,21 +28,20 @@ from __future__ import annotations
 
 import os
 import shutil
-import time
 import subprocess
 import sys
+import time
 from dataclasses import fields as dc_fields
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QSizePolicy, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from mesher.config import MeshConfig, PartType
@@ -47,6 +50,11 @@ from mesher.pipeline import Result, run_batch
 from .theme import C, QSS
 
 STEP_EXT = (".stp", ".step", ".STP", ".STEP")
+
+# 프로그램 폴더 기준 프리셋 위치. 실행 위치와 무관하게 항상 같은 곳을 쓴다.
+APP_DIR = Path(__file__).resolve().parents[1]
+PRESET_DIR = APP_DIR / "presets"
+LAST_PRESET = PRESET_DIR / "last.json"
 
 # (필드명, 라벨, 타입, 최소, 최대, 스텝, 툴팁)
 COMMON_SPEC = [
@@ -67,11 +75,11 @@ SHELL_SPEC = [
     ("thin_thickness_max", "박판 판정 두께", float, 0.1, 100.0, 0.5,
      "자동 판정에서 이 등가두께 이하면 프레스로 봄"),
     ("shell_default_thickness", "기본 판 두께", float, 0.01, 100.0, 0.1,
-     "solid 없이 면만 있는 STEP에서 SECTION에 쓸 두께"),
+     "면쌍에서 두께를 못 잴 때만 쓰는 값"),
 ]
 TET_SPEC = [
     ("tet_min_size_factor", "최소 크기 비율", float, 0.02, 1.0, 0.05,
-     "최소 요소 크기 = 요소 크기 × 이 값"),
+     "최소 요소 크기 = 요소 크기 x 이 값"),
     ("tet_curvature_nodes", "곡률 분할 수", int, 0, 60, 2,
      "원 한 바퀴에 들어갈 요소 수 (0이면 곡률 제어 끔)"),
 ]
@@ -82,8 +90,10 @@ HEX_SPEC = [
      "0이면 요소 크기와 동일"),
     ("hex_wall_thickness", "벽 두께 지정", float, 0.0, 100.0, 0.5,
      "0이면 단면에서 자동 산출"),
-    ("extrusion_tol", "압출 판정 허용", float, 0.001, 0.5, 0.01,
-     "V ≈ 단면적 × 길이 오차 허용"),
+    ("extrusion_tol", "압출 판정 허용", float, 0.001, 0.9, 0.01,
+     "V = 단면적 x 길이 오차 허용. 로그의 체적오차보다 크게 잡으면 통과한다"),
+    ("hex_cap_area_tol", "캡 면적 차이 허용", float, 0.001, 0.9, 0.01,
+     "양 끝 단면의 면적 차이 허용 비율"),
 ]
 CHECK_SPEC = [
     ("auto_make_solid", "면 봉합으로 solid 복원"),
@@ -91,11 +101,11 @@ CHECK_SPEC = [
     ("shell_quad_dominant", "shell quad 우선"),
     ("shell_imprint", "패치 imprint(절점 공유)"),
     ("hex_full_quad", "hexa 100% 유도"),
+    ("hex_force_extrusion", "압출 강제 진행"),
     ("second_order", "2차 요소"),
     ("optimize", "메시 최적화"),
     ("write_sections", "SECTION 자동 작성"),
 ]
-# 체크박스에 쓸 이름: 내부 형식 키 -> 표시 문구
 FORMATS = {"inp": "inp (Abaqus)", "k": "k (LS-DYNA)"}
 
 
@@ -115,6 +125,7 @@ def card(title: str) -> Tuple[QFrame, QVBoxLayout]:
 class Worker(QObject):
     logged = Signal(str)
     progressed = Signal(int, int)
+    staged = Signal(float, str)
     finished = Signal(list)
 
     def __init__(self, items: List[Tuple[str, PartType]], cfg: MeshConfig, outdir: str):
@@ -132,6 +143,7 @@ class Worker(QObject):
                 log=self.logged.emit,
                 progress=lambda i, n: self.progressed.emit(i, n),
                 should_stop=lambda: self._stop,
+                stage=lambda frac, text: self.staged.emit(frac, text),
             )
         except Exception as exc:  # 워커에서 죽어도 UI는 살려둔다
             self.logged.emit(f"[치명적 오류] {exc}")
@@ -143,7 +155,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("STEP Mesher")
-        self.resize(1240, 820)
+        self.resize(1240, 840)
         self.setAcceptDrops(True)
         self.cfg = MeshConfig()
         self.widgets: Dict[str, QWidget] = {}
@@ -152,13 +164,12 @@ class MainWindow(QMainWindow):
         self.worker: Worker | None = None
         self.results: List[Result] = []
         self.started_at: float = 0.0
-        self.done_count: int = 0
-        self.total_count: int = 0
+        self.stage_text: str = ""
         self.tick = QTimer(self)
         self.tick.setInterval(500)
-        self.tick.timeout.connect(self._update_elapsed)
+        self.tick.timeout.connect(self._update_status)
         self._build()
-        self._push_config()
+        self._load_last_preset()
 
     # ------------------------------------------------------------- 레이아웃
     def _build(self) -> None:
@@ -172,7 +183,7 @@ class MainWindow(QMainWindow):
         head.setSpacing(2)
         title = QLabel("STEP Mesher")
         title.setObjectName("Title")
-        sub = QLabel("STEP 파일을 읽어 파트 유형에 맞는 메시를 만들고 Abaqus로 내보냅니다")
+        sub = QLabel("STEP 파일을 읽어 파트 유형에 맞는 메시를 만들고 내보냅니다")
         sub.setObjectName("Subtitle")
         head.addWidget(title)
         head.addWidget(sub)
@@ -207,7 +218,7 @@ class MainWindow(QMainWindow):
         hh.setSectionResizeMode(2, QHeaderView.Fixed)
         self.table.setColumnWidth(1, 130)
         self.table.setColumnWidth(2, 90)
-        self.table.setMinimumHeight(200)
+        self.table.setMinimumHeight(220)
         inner.addWidget(self.table, 1)
 
         hint = QLabel("STEP 파일을 창에 끌어다 놓아도 됩니다")
@@ -239,7 +250,7 @@ class MainWindow(QMainWindow):
 
         out_box, out_lay = card("출력")
         row = QHBoxLayout()
-        self.outdir = QLineEdit(str(Path.home() / "mesh_out"))
+        self.outdir = QLineEdit(str(APP_DIR / "mesh_out"))
         pick = QPushButton("폴더")
         pick.clicked.connect(self.pick_outdir)
         openb = QPushButton("열기")
@@ -262,28 +273,18 @@ class MainWindow(QMainWindow):
         return wrap
 
     def _right_panel(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        lay = QVBoxLayout(inner)
+        wrap = QWidget()
+        lay = QVBoxLayout(wrap)
         lay.setContentsMargins(7, 0, 0, 0)
         lay.setSpacing(12)
 
-        lay.addWidget(self._spec_card("공통", COMMON_SPEC))
-        lay.addWidget(self._spec_card("프레스 · shell", SHELL_SPEC))
-        lay.addWidget(self._spec_card("사출 · tetra", TET_SPEC))
-        lay.addWidget(self._spec_card("압출 · hexa", HEX_SPEC))
-
-        opt, opt_lay = card("옵션")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(8)
-        for i, (name, label) in enumerate(CHECK_SPEC):
-            cb = QCheckBox(label)
-            self.widgets[name] = cb
-            grid.addWidget(cb, i // 2, i % 2)
-        opt_lay.addLayout(grid)
-        lay.addWidget(opt)
+        tabs = QTabWidget()
+        tabs.addTab(self._spec_page(COMMON_SPEC), "공통")
+        tabs.addTab(self._spec_page(SHELL_SPEC), "프레스")
+        tabs.addTab(self._spec_page(TET_SPEC), "사출")
+        tabs.addTab(self._spec_page(HEX_SPEC), "압출")
+        tabs.addTab(self._options_page(), "옵션")
+        lay.addWidget(tabs, 1)
 
         preset, p_lay = card("프리셋")
         row = QHBoxLayout()
@@ -297,17 +298,22 @@ class MainWindow(QMainWindow):
             row.addWidget(w)
         row.addStretch(1)
         p_lay.addLayout(row)
+        path_hint = QLabel(f"저장 위치: {PRESET_DIR}\n종료할 때 현재 설정이 "
+                           f"last.json으로 자동 저장됩니다")
+        path_hint.setObjectName("Hint")
+        path_hint.setWordWrap(True)
+        p_lay.addWidget(path_hint)
         lay.addWidget(preset)
+        return wrap
 
-        lay.addStretch(1)
-        scroll.setWidget(inner)
-        return scroll
-
-    def _spec_card(self, title: str, spec) -> QFrame:
-        box, lay = card(title)
+    def _spec_page(self, spec) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
+        grid.setVerticalSpacing(9)
         for r, (name, label, typ, lo, hi, step, tip) in enumerate(spec):
             lab = QLabel(label)
             lab.setToolTip(tip)
@@ -328,7 +334,20 @@ class MainWindow(QMainWindow):
         grid.setColumnStretch(0, 3)
         grid.setColumnStretch(1, 2)
         lay.addLayout(grid)
-        return box
+        lay.addStretch(1)
+        return page
+
+    def _options_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(9)
+        for name, label in CHECK_SPEC:
+            cb = QCheckBox(label)
+            self.widgets[name] = cb
+            lay.addWidget(cb)
+        lay.addStretch(1)
+        return page
 
     def _footer(self) -> QWidget:
         box, lay = card("")
@@ -454,18 +473,47 @@ class MainWindow(QMainWindow):
                 setattr(cfg, f.name, float(w.value()))
             elif isinstance(w, QCheckBox):
                 setattr(cfg, f.name, w.isChecked())
-        cfg.export_formats = [n for n, cb in self.format_boxes.items() if cb.isChecked()] or ["inp"]
+        cfg.export_formats = [n for n, cb in self.format_boxes.items()
+                              if cb.isChecked()] or ["inp"]
         return cfg
 
+    def _load_last_preset(self) -> None:
+        """지난번 설정을 자동으로 복원한다."""
+        if LAST_PRESET.exists():
+            try:
+                self.cfg = MeshConfig.load(LAST_PRESET)
+                self._push_config()
+                self.append_log(f"지난 설정 복원: {LAST_PRESET.name}")
+                return
+            except Exception as exc:
+                self.append_log(f"지난 설정을 읽지 못했습니다: {exc}")
+        self._push_config()
+
+    def _save_last_preset(self) -> None:
+        try:
+            PRESET_DIR.mkdir(parents=True, exist_ok=True)
+            self._pull_config().save(LAST_PRESET)
+        except Exception:
+            pass
+
+    def closeEvent(self, event) -> None:
+        self._save_last_preset()
+        super().closeEvent(event)
+
     def save_preset(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "프리셋 저장", "mesh_preset.json",
-                                              "JSON (*.json)")
+        PRESET_DIR.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "프리셋 저장", str(PRESET_DIR / "mesh_preset.json"), "JSON (*.json)"
+        )
         if path:
             self._pull_config().save(path)
             self.append_log(f"프리셋 저장: {path}")
 
     def load_preset(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "프리셋 불러오기", "", "JSON (*.json)")
+        PRESET_DIR.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "프리셋 불러오기", str(PRESET_DIR), "JSON (*.json)"
+        )
         if path:
             self.cfg = MeshConfig.load(path)
             self._push_config()
@@ -492,21 +540,21 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "파일 없음", "STEP 파일을 먼저 추가하세요.")
             return
         cfg = self._pull_config()
-        outdir = self.outdir.text().strip() or str(Path.home() / "mesh_out")
+        outdir = self.outdir.text().strip() or str(APP_DIR / "mesh_out")
+        self._save_last_preset()
 
         for r in range(self.table.rowCount()):
             self.table.setItem(r, 2, QTableWidgetItem("진행"))
         self.log.clear()
-        # 파트 하나에도 수십 초가 걸리므로 진행 바는 계속 움직이게 둔다
-        self.bar.setRange(0, 0)
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.view_btn.setEnabled(False)
         self.started_at = time.perf_counter()
-        self.done_count = 0
-        self.total_count = len(items)
+        self.stage_text = "준비"
         self.tick.start()
-        self._update_elapsed()
+        self._update_status()
 
         self.thread = QThread(self)
         self.worker = Worker(items, cfg, outdir)
@@ -514,6 +562,7 @@ class MainWindow(QMainWindow):
         self.thread.started.connect(self.worker.run)
         self.worker.logged.connect(self.append_log)
         self.worker.progressed.connect(self.on_progress)
+        self.worker.staged.connect(self.on_stage)
         self.worker.finished.connect(self.on_finished)
         self.worker.finished.connect(self.thread.quit)
         self.thread.finished.connect(self.thread.deleteLater)
@@ -522,25 +571,29 @@ class MainWindow(QMainWindow):
     def stop_run(self) -> None:
         if self.worker:
             self.worker.stop()
-            self.tick.stop()
-            self.status.setText("중단 요청 — 현재 파트까지 마무리합니다")
+            self.stage_text = "중단 요청 — 현재 파트까지 마무리"
+            self._update_status()
 
+    # ------------------------------------------------------------- 진행 표시
     def _fmt_elapsed(self) -> str:
         s = int(time.perf_counter() - self.started_at)
         return f"{s // 60}분 {s % 60}초" if s >= 60 else f"{s}초"
 
-    def _update_elapsed(self) -> None:
-        self.status.setText(
-            f"처리 중 {self.done_count}/{self.total_count} · 경과 {self._fmt_elapsed()}"
-        )
+    def _update_status(self) -> None:
+        self.status.setText(f"{self.stage_text} · {self.bar.value()}% · "
+                            f"경과 {self._fmt_elapsed()}")
+
+    def on_stage(self, frac: float, text: str) -> None:
+        self.bar.setValue(int(round(100 * min(max(frac, 0.0), 1.0))))
+        self.stage_text = text
+        self._update_status()
 
     def on_progress(self, done: int, total: int) -> None:
-        self.done_count, self.total_count = done, total
-        self._update_elapsed()
+        self.stage_text = f"{done}/{total} 파일 완료"
+        self._update_status()
 
     def on_finished(self, results: List[Result]) -> None:
         self.tick.stop()
-        self.bar.setRange(0, 100)
         self.results = results
         by_source: Dict[str, List[Result]] = {}
         for r in results:
@@ -562,7 +615,7 @@ class MainWindow(QMainWindow):
 
         ok = sum(1 for r in results if r.ok)
         self.append_log("")
-        self.append_log(f"── 결과 {ok}/{len(results)} 성공 ──")
+        self.append_log(f"-- 결과 {ok}/{len(results)} 성공 --")
         for r in results:
             self.append_log("  " + r.summary())
         self.bar.setValue(100)
