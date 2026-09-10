@@ -2,6 +2,10 @@
 
 버전 이력
 ---------
+v1.3 (수정본)
+  - auto_make_solid 추가. 겉면 surface만 들어있는 STEP을 sew/heal해서
+    solid로 복원한다. 이게 되어야 압출 hexa나 tetra를 적용할 수 있다.
+  - shell_default_thickness는 이제 "면쌍에서 두께를 못 재는 경우"에만 쓰인다.
 v1.2 (수정본)
   - 출력 형식을 inp(Abaqus)와 k(LS-DYNA) 두 가지로 정리.
   - surface 전용 STEP 지원을 위해 shell_default_thickness 추가.
@@ -46,6 +50,8 @@ class MeshConfig:
     second_order: bool = False     # 2차 요소 (S8R / C3D10 / C3D20)
     optimize: bool = True          # netgen 최적화
     scale: float = 1.0             # STEP 단위 보정 (m 입력이면 1000)
+    auto_make_solid: bool = True   # 면만 있는 STEP을 sew해서 solid로 복원
+    heal_tolerance: float = 1e-4   # sew/heal 허용오차 (모델 단위)
 
     # ---------------- 자동 분류 ----------------
     thin_thickness_max: float = 6.0   # 등가두께가 이 값 이하면 얇은 판재로 봄
@@ -57,7 +63,7 @@ class MeshConfig:
     shell_quad_dominant: bool = True   # quad-dominant (S4R 위주)
     shell_imprint: bool = True         # mid-surface 패치끼리 imprint하여 절점 공유
     shell_fallback_offset: bool = True  # 면쌍 실패 시 최대면 오프셋으로 대체
-    shell_default_thickness: float = 1.0  # surface 전용 STEP에서 쓸 기본 판 두께
+    shell_default_thickness: float = 1.0  # 면쌍에서 두께를 못 잴 때만 쓰는 값
 
     # ---------------- tetra (사출) ----------------
     tet_min_size_factor: float = 0.25  # 최소 크기 = element_size × factor
