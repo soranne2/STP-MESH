@@ -4,7 +4,13 @@ gmsh OCC 커널의 조회 API만 사용하므로 별도 CAD 라이브러리가 �
 
 버전 이력
 ---------
-v1.1 (수정본)
+v1.2 (수정본)
+  - solid이 없는 surface 전용 STEP도 처리할 수 있도록 load_step이 surface
+    태그까지 함께 돌려주도록 변경 (load_shapes).
+  - washer 생성으로 면이 쪼개질 때 두께 정보가 유실되던 문제 수정.
+    setup_holes/apply_washers가 meta 딕셔너리를 받아 자식 면에 부모의
+    두께를 물려준다.
+v1.1
   - "signal only works in main thread of the main interpreter" 오류 수정.
     gmsh.initialize()가 SIGINT 핸들러를 등록하는데 파이썬은 메인 스레드가
     아니면 이를 금지한다. 메시 작업은 GUI 워커 스레드에서 돌기 때문에
@@ -97,12 +103,23 @@ def load_step(path: str, cfg: MeshConfig, log: Logger) -> List[int]:
         log(f"  단위 스케일 {cfg.scale}배 적용")
 
     solids = [t for _, t in gmsh.model.getEntities(3)]
-    if not solids:
-        surfs = gmsh.model.getEntities(2)
-        log(f"  solid 없음 — surface {len(surfs)}개로 인식 (shell 전용)")
-    else:
+    if solids:
         log(f"  solid {len(solids)}개 로드")
+    else:
+        surfs = [t for _, t in gmsh.model.getEntities(2)]
+        log(f"  solid 없음 — surface {len(surfs)}개를 mid-surface로 사용")
     return solids
+
+
+def load_shapes(path: str, cfg: MeshConfig, log: Logger) -> Tuple[List[int], List[int]]:
+    """(solid 태그, surface 태그)를 함께 반환.
+
+    설계팀이나 ANSA에서 뽑은 mid-surface STEP처럼 solid이 아예 없는 파일도
+    있으므로, 그런 경우 surface를 바로 shell 메시 대상으로 쓴다.
+    """
+    solids = load_step(path, cfg, log)
+    surfaces = [t for _, t in gmsh.model.getEntities(2)]
+    return solids, surfaces
 
 
 # ------------------------------------------------------------------ 면/솔리드 정보
@@ -370,20 +387,35 @@ def build_structured_washer(hole: Hole, cfg: MeshConfig) -> bool:
     return True
 
 
-def apply_washers(holes: Sequence[Hole], cfg: MeshConfig, log: Logger) -> List[Hole]:
-    """정렬 washer를 시도하고, 실패한 홀 목록을 돌려준다."""
+def apply_washers(holes: Sequence[Hole], cfg: MeshConfig, log: Logger,
+                  meta: Optional[dict] = None) -> List[Hole]:
+    """정렬 washer를 시도하고, 실패한 홀 목록을 돌려준다.
+
+    meta(면 태그 -> 두께)를 넘기면 washer 때문에 쪼개진 자식 면들이
+    부모 면의 두께를 물려받는다. 이게 없으면 *SHELL SECTION을 쓸 때
+    두께 그룹이 통째로 날아간다.
+    """
     if not cfg.structured_washer or cfg.washer_width <= 0:
         return list(holes)
     failed: List[Hole] = []
     made = 0
     for h in holes:
+        before = {t for _, t in gmsh.model.getEntities(2)}
         try:
-            if build_structured_washer(h, cfg):
-                made += 1
-            else:
-                failed.append(h)
+            ok = build_structured_washer(h, cfg)
         except Exception:
+            ok = False
+        if ok:
+            made += 1
+        else:
             failed.append(h)
+        if meta is not None and h.face in meta:
+            parent = meta[h.face]
+            after = {t for _, t in gmsh.model.getEntities(2)}
+            for t in after - before:
+                meta[t] = parent
+            if h.face not in after:
+                meta.pop(h.face, None)
     if made:
         log(f"  정렬 washer 생성 {made}개 (폭 {cfg.washer_width})")
     if failed:
@@ -392,7 +424,8 @@ def apply_washers(holes: Sequence[Hole], cfg: MeshConfig, log: Logger) -> List[H
 
 
 def setup_holes(face_tags: Sequence[int], cfg: MeshConfig, log: Logger,
-                structured: bool = True) -> Optional[int]:
+                structured: bool = True,
+                meta: Optional[dict] = None) -> Optional[int]:
     """홀 검출 -> washer 생성 -> 원주 노드 고정 -> 남은 홀에 크기 필드.
 
     반환값은 Min field 태그(없으면 None). washer가 만들어진 홀은 내부 원이
@@ -402,7 +435,7 @@ def setup_holes(face_tags: Sequence[int], cfg: MeshConfig, log: Logger,
     if not holes:
         return None
     if structured and cfg.structured_washer and cfg.washer_width > 0:
-        apply_washers(holes, cfg, log)
+        apply_washers(holes, cfg, log, meta=meta)
         current = [t for _, t in gmsh.model.getEntities(2)]
         holes = find_holes(current, cfg, lambda _m: None)
     if not holes:
