@@ -2,6 +2,9 @@
 
 버전 이력
 ---------
+v1.3 (수정본)
+  - solid이 없을 때 요청한 파트 유형을 조용히 무시하고 shell로 처리하던 동작 수정.
+    압출/사출을 지정했는데 solid 복원에 실패하면 그 사실을 오류로 알린다.
 v1.2 (수정본)
   - solid이 없는 surface 전용 STEP을 실패 처리하던 것을 고쳐, 들어온 면을
     그대로 mid-surface로 보고 shell 메시하도록 분기 추가.
@@ -117,6 +120,12 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
         if n_surfaces == 0:
             return [Result(str(src), src.stem, requested,
                            error="STEP 안에 solid도 surface도 없습니다")]
+        if requested in (PartType.EXTRUSION, PartType.INJECTION):
+            return [Result(
+                str(src), src.stem, requested,
+                error=(f"{requested.label}은 solid이 필요한데 이 STEP에서 solid을 "
+                       "만들지 못했습니다. '면 봉합으로 solid 복원'이 켜져 있는지, "
+                       "'봉합 허용오차'가 형상의 틈보다 큰지 확인하세요"))]
         return [_run_surface_only(src, cfg, out_root, log)]
 
     for idx, solid in enumerate(solids, start=1):
@@ -170,7 +179,7 @@ def _run_surface_only(src: Path, cfg: MeshConfig, out_root: Path,
     name = src.stem
     res = Result(str(src), name, PartType.PRESS,
                  reason="solid 없음 — 입력 surface를 mid-surface로 사용")
-    log(f"[{name}] surface 전용 STEP — shell 메시로 처리")
+    log(f"[{name}] solid 복원 실패 — 면만 있는 STEP으로 보고 shell 메시로 처리")
     try:
         g.start()
         _, surfaces = g.load_shapes(str(src), cfg, lambda _m: None)
