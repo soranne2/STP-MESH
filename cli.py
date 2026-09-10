@@ -24,7 +24,8 @@ def main(argv=None) -> int:
     p.add_argument("--hole-nodes", type=int, help="홀 원주 노드 수")
     p.add_argument("--washer", type=float, help="washer 폭")
     p.add_argument("--layers", type=int, help="hexa 두께방향 층 수")
-    p.add_argument("--format", nargs="+", default=None, help="출력 형식 (inp msh nas ...)")
+    p.add_argument("--format", nargs="+", default=None,
+                   choices=["inp", "k"], help="출력 형식 (inp=Abaqus, k=LS-DYNA)")
     p.add_argument("--dry-run", action="store_true",
                    help="분류와 설정만 출력하고 메시는 만들지 않음")
     a = p.parse_args(argv)
