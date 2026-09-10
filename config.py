@@ -2,6 +2,10 @@
 
 버전 이력
 ---------
+v1.5 (수정본)
+  - 압출 캡 검출 관련 옵션 추가: hex_cap_area_tol(캡 면적 차이 허용),
+    hex_force_extrusion(판정 실패 시 최장축으로 강제 진행).
+    캡이 여러 장으로 쪼개져 있거나 끝단에 가공 형상이 있는 모델 대응.
 v1.4 (수정본)
   - PartType.coerce() 추가. PartType이 str Enum이라 Qt 위젯을 거치면
     평범한 str로 돌아오고, 그러면 'is PartType.EXTRUSION' 비교가 전부
@@ -93,6 +97,8 @@ class MeshConfig:
     hex_axial_size: float = 0.0     # 압출 방향 요소 크기 (0이면 element_size 사용)
     hex_wall_thickness: float = 0.0  # 0이면 단면에서 자동 산출
     hex_full_quad: bool = True      # blossom full-quad로 100% hexa 유도
+    hex_cap_area_tol: float = 0.05  # 양 끝 캡 면적 차이 허용 비율
+    hex_force_extrusion: bool = False  # 판정 실패 시 최장축 기준으로 강제 진행
 
     # ---------------- 출력 ----------------
     export_formats: List[str] = field(default_factory=lambda: ["inp"])  # inp / k
