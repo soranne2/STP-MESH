@@ -6,6 +6,14 @@ gmsh의 extrude(recombine=True)로 층을 쌓으면 100% hexa가 나온다.
 
 '두께방향 layer'는 단면 벽 두께를 hex_through_layers로 나눈 값을
 단면 요소 크기로 잡아 구현한다 (예: 벽 2.5mm, 2층 -> 단면 크기 1.25mm).
+
+버전 이력
+---------
+v1.3 (수정본)
+  - 원통 등 주기적 면에서 full-quad 재조합이 실패하던 문제 대응.
+    generate_mesh()를 통해 호출해 blossom으로 자동 재시도한다.
+v1.0
+  - 최초 작성.
 """
 from __future__ import annotations
 
@@ -91,7 +99,7 @@ def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, float]:
         except Exception:
             pass
 
-    gmsh.model.mesh.generate(3)
+    g.generate_mesh(3, log)
     if cfg.second_order:
         gmsh.model.mesh.setOrder(2)
         gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 1)  # C3D20R
