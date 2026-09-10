@@ -12,6 +12,8 @@ mid-surface는 면쌍 추출 + 벤딩부 연장 + 자동 봉합까지 한 번에
 
 버전 이력
 ---------
+v1.5 (수정본)
+  - 진행 단계 콜백(stage) 지원.
 v1.3 (수정본)
   - surface 전용 STEP에서도 두께를 실측한다. 면쌍 탐색을 solid이 아니라
     면 목록에 대해 수행하도록 바꿔, 겉면만 있는 모델도 마주보는 면 간
@@ -32,7 +34,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import gmsh
 
@@ -40,6 +42,7 @@ from . import geometry as g
 from .config import MeshConfig
 
 Logger = Callable[[str], None]
+Stage = Optional[Callable[[float, str], None]]
 
 
 @dataclass
@@ -165,8 +168,10 @@ def report_free_edges(log: Logger) -> int:
 
 
 def _mesh_2d(tags: List[int], thickness: Dict[int, float],
-             cfg: MeshConfig, log: Logger) -> Dict[str, object]:
+             cfg: MeshConfig, log: Logger, stage: Stage = None) -> Dict[str, object]:
     """홀/washer 처리 후 2D 메시를 만들고 두께별 물리 그룹을 붙인다."""
+    if stage:
+        stage(0.30, "홀 / washer 처리")
     field = g.setup_holes(tags, cfg, log, structured=True, meta=thickness)
     free = report_free_edges(log)
 
@@ -186,6 +191,8 @@ def _mesh_2d(tags: List[int], thickness: Dict[int, float],
     else:
         gmsh.option.setNumber("Mesh.Algorithm", 6)
 
+    if stage:
+        stage(0.50, "메시 생성")
     g.generate_mesh(2, log)
     if cfg.optimize:
         gmsh.model.mesh.optimize("Laplace2D")
@@ -207,8 +214,11 @@ def _mesh_2d(tags: List[int], thickness: Dict[int, float],
             "thickness_groups": {f"{k:.3f}": len(v) for k, v in groups.items()}}
 
 
-def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, object]:
+def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger,
+         stage: Stage = None) -> Dict[str, object]:
     """solid에서 mid-surface를 뽑아 shell 메시."""
+    if stage:
+        stage(0.05, "면쌍 탐색")
     pairs = find_face_pairs(info.faces, cfg)
     if pairs:
         ts = sorted({round(p.thickness, 2) for p in pairs})
@@ -220,15 +230,17 @@ def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, object]:
         pairs = [FacePair(biggest, biggest, info.eq_thickness)]
         log(f"  면쌍 실패 — 최대면 단독 오프셋으로 대체 (t={info.eq_thickness:.2f})")
 
+    if stage:
+        stage(0.20, "mid-surface 생성")
     mid_tags, thickness = offset_pairs(pairs, log)
     _keep_only(mid_tags)
     if cfg.shell_imprint:
         mid_tags, thickness = imprint_patches(mid_tags, thickness, log)
-    return _mesh_2d(mid_tags, thickness, cfg, log)
+    return _mesh_2d(mid_tags, thickness, cfg, log, stage)
 
 
 def mesh_surfaces(surface_tags: List[int], cfg: MeshConfig,
-                  log: Logger) -> Dict[str, object]:
+                  log: Logger, stage: Stage = None) -> Dict[str, object]:
     """solid 없이 면만 있는 STEP을 shell 메시.
 
     먼저 마주보는 면쌍을 찾아 실제 판 두께를 재고 mid-surface를 만든다.
@@ -236,6 +248,8 @@ def mesh_surfaces(surface_tags: List[int], cfg: MeshConfig,
     면쌍을 하나도 못 찾으면 들어온 면을 그대로 쓰고
     shell_default_thickness를 두께로 가정한다.
     """
+    if stage:
+        stage(0.05, "면쌍 탐색")
     pairs = find_face_pairs(surface_tags, cfg)
     if pairs:
         ts = sorted({round(p.thickness, 2) for p in pairs})
@@ -252,4 +266,4 @@ def mesh_surfaces(surface_tags: List[int], cfg: MeshConfig,
 
     if cfg.shell_imprint:
         mid_tags, thickness = imprint_patches(mid_tags, thickness, log)
-    return _mesh_2d(mid_tags, thickness, cfg, log)
+    return _mesh_2d(mid_tags, thickness, cfg, log, stage)
