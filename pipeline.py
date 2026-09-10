@@ -2,6 +2,10 @@
 
 버전 이력
 ---------
+v1.4 (수정본)
+  - 넘어온 파트 유형을 PartType.coerce()로 정규화. GUI에서 고른 유형이
+    무시되고 tetra로 처리되던 원인.
+  - 파트별 소요 시간을 로그와 결과 요약에 남긴다.
 v1.3 (수정본)
   - solid이 없을 때 요청한 파트 유형을 조용히 무시하고 shell로 처리하던 동작 수정.
     압출/사출을 지정했는데 solid 복원에 실패하면 그 사실을 오류로 알린다.
@@ -13,6 +17,7 @@ v1.0
 """
 from __future__ import annotations
 
+import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +49,7 @@ class Result:
     quality_min: float = 0.0
     quality_avg: float = 0.0
     quality_bad: int = 0
+    seconds: float = 0.0
     extra: Dict[str, object] = field(default_factory=dict)
     error: str = ""
 
@@ -55,10 +61,12 @@ class Result:
         if self.error:
             return f"{self.part}: 실패 — {self.error}"
         el = ", ".join(f"{k} {v:,}" for k, v in sorted(self.elements.items()))
-        return (f"{self.part} [{self.part_type.label}] "
+        label = PartType.coerce(self.part_type).label
+        return (f"{self.part} [{label}] "
                 f"node {self.nodes:,} / {el} / "
                 f"품질 min {self.quality_min:.3f} avg {self.quality_avg:.3f}"
-                + (f" / 저품질 {self.quality_bad}" if self.quality_bad else ""))
+                + (f" / 저품질 {self.quality_bad}" if self.quality_bad else "")
+                + (f" / {self.seconds:.1f}초" if self.seconds else ""))
 
 
 def _count_elements() -> Dict[str, int]:
@@ -101,6 +109,7 @@ def _isolate(solid_tag: int) -> None:
 
 def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
              outdir: str, log: Logger) -> List[Result]:
+    requested = PartType.coerce(requested)
     src = Path(step_path)
     out_root = Path(outdir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -132,22 +141,24 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
         name = src.stem if n_solids == 1 else f"{src.stem}_p{idx:02d}"
         res = Result(str(src), name, requested)
         log(f"[{name}] 처리 시작")
+        t_start = time.perf_counter()
         try:
             g.start()
             g.load_step(str(src), cfg, lambda _m: None)
             _isolate(solid)
             info = g.solid_info(solid)
 
-            part_type = requested
-            if part_type is PartType.AUTO:
+            part_type = PartType.coerce(requested)
+            if part_type == PartType.AUTO:
                 part_type, reason = g.classify(info, cfg, log)
                 res.reason = reason
                 log(f"  자동 판정: {part_type.label} — {reason}")
             res.part_type = part_type
 
-            if part_type is PartType.PRESS:
+            log(f"  적용 유형: {part_type.label}")
+            if part_type == PartType.PRESS:
                 extra = shell.mesh(info, cfg, log)
-            elif part_type is PartType.EXTRUSION:
+            elif part_type == PartType.EXTRUSION:
                 extra = hexa.mesh(info, cfg, log)
             else:
                 extra = tetra.mesh(info, cfg, log)
@@ -161,8 +172,10 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
             groups = extra.get("thickness_groups") or {}
             res.files = exporter.write(out_root / name, cfg, part_type,
                                        groups if isinstance(groups, dict) else {}, log)
+            res.seconds = time.perf_counter() - t_start
             log(f"  완료 — {res.summary()}")
         except Exception as exc:
+            res.seconds = time.perf_counter() - t_start
             res.error = str(exc)
             log(f"  [오류] {exc}")
             log(traceback.format_exc(limit=3))
