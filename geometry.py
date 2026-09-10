@@ -4,6 +4,11 @@ gmsh OCC 커널의 조회 API만 사용하므로 별도 CAD 라이브러리가 �
 
 버전 이력
 ---------
+v1.5 (수정본)
+  - 압출 캡 검출을 전면 개선. 캡이 한 장이라는 가정을 버리고, 같은 평면에
+    놓인 여러 면을 하나의 캡으로 묶는다. 축 후보도 모든 평면 법선에서 뽑는다.
+    실패 원인을 수치로 알려주는 describe_extrusion_failure()와, 검증을
+    건너뛰는 detect_extrusion_forced()를 추가.
 v1.3 (수정본)
   - 겉면 surface만 있는 STEP을 sew/heal해서 solid로 복원 (auto_make_solid).
     OCCSewFaces / OCCMakeSolids 옵션을 import 전에 켜고, 그래도 solid이
@@ -218,42 +223,110 @@ def solid_info(tag: int) -> SolidInfo:
 # ------------------------------------------------------------------ 압출 검출
 @dataclass
 class Extrusion:
-    cap: int          # 소스가 될 단면(캡) 면 태그
-    other_cap: int
-    axis: Vec         # 단위 압출 방향 (cap -> other_cap)
+    caps: List[int]        # 소스가 될 단면(캡) 면들. 여러 장으로 쪼개져 있을 수 있다
+    far_caps: List[int]    # 반대쪽 끝의 캡 면들
+    axis: Vec              # 단위 압출 방향 (caps -> far_caps)
     length: float
     cap_area: float
     cap_diag: float
+    vol_err: float         # |V - A×L| / V. 0에 가까울수록 순수 압출
 
 
-def detect_extrusion(info: SolidInfo, cfg: MeshConfig) -> Optional[Extrusion]:
-    """평행하고 면적이 같은 평면 캡 한 쌍 + V ≈ A×L 조건으로 압출 형상을 판별."""
+def _axis_candidates(planar: Sequence[int], cache: dict) -> List[Vec]:
+    """평면들의 법선을 방향 중복 없이 모은 축 후보."""
+    axes: List[Vec] = []
+    for f in planar:
+        n = cache[f][0]
+        if all(abs(dot(n, a)) < 0.999 for a in axes):
+            axes.append(n)
+    return axes
+
+
+def _group_bbox_diag(faces: Sequence[int]) -> float:
+    lo = [float("inf")] * 3
+    hi = [float("-inf")] * 3
+    for f in faces:
+        b = gmsh.model.getBoundingBox(2, f)
+        for i in range(3):
+            lo[i] = min(lo[i], b[i])
+            hi[i] = max(hi[i], b[i + 3])
+    return norm((hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]))
+
+
+def _extrusion_candidates(info: "SolidInfo", cfg: MeshConfig) -> List[Extrusion]:
+    """축 후보마다 양 끝 캡을 모아 압출 후보를 만든다 (검증 없이 전부 반환).
+
+    캡이 한 장이라는 가정을 버렸다. 끝면이 여러 조각으로 나뉜 프로파일,
+    모따기나 가공 형상이 붙은 끝단도 같은 평면 위에 있으면 함께 캡으로 묶인다.
+    """
     planar = [f for f in info.faces if is_planar(f)]
-    best: Optional[Extrusion] = None
-    for i, a in enumerate(planar):
-        na, ca, aa = face_normal(a), face_center(a), face_area(a)
-        if aa < 1e-9:
+    if not planar:
+        return []
+    cache = {f: (face_normal(f), face_center(f), face_area(f)) for f in planar}
+    postol = max(1e-9, 1e-3 * info.diag)
+    out: List[Extrusion] = []
+
+    for n in _axis_candidates(planar, cache):
+        proj = {f: dot(cache[f][1], n) for f in planar}
+        lo_faces = [f for f in planar if dot(cache[f][0], n) < -0.995]
+        hi_faces = [f for f in planar if dot(cache[f][0], n) > 0.995]
+        if not lo_faces or not hi_faces:
             continue
-        for b in planar[i + 1:]:
-            nb, cb, ab = face_normal(b), face_center(b), face_area(b)
-            if dot(na, nb) > -0.999:          # 서로 반대 방향이어야 캡
-                continue
-            if abs(aa - ab) / max(aa, ab) > 0.02:
-                continue
-            d = sub(cb, ca)
-            length = abs(dot(d, na))
-            if length < 1e-6:
-                continue
-            # 측면 어긋남이 크면 캡이 아님
-            lateral = norm(sub(d, scale(na, dot(d, na))))
-            if lateral > 0.02 * max(length, math.sqrt(aa)):
-                continue
-            if abs(info.volume - aa * length) / info.volume > cfg.extrusion_tol:
-                continue
-            cand = Extrusion(a, b, unit(scale(na, -1.0)), length, aa, bbox_diag(2, a))
-            if best is None or cand.length > best.length:
-                best = cand
+        lo_p = min(proj[f] for f in lo_faces)
+        hi_p = max(proj[f] for f in hi_faces)
+        length = hi_p - lo_p
+        if length <= postol:
+            continue
+        lo_group = [f for f in lo_faces if abs(proj[f] - lo_p) <= postol]
+        hi_group = [f for f in hi_faces if abs(proj[f] - hi_p) <= postol]
+        a_lo = sum(cache[f][2] for f in lo_group)
+        a_hi = sum(cache[f][2] for f in hi_group)
+        if a_lo <= 1e-12 or a_hi <= 1e-12:
+            continue
+        vol_err = (abs(info.volume - a_lo * length) / info.volume
+                   if info.volume > 1e-12 else 1.0)
+        out.append(Extrusion(lo_group, hi_group, n, length, a_lo,
+                             _group_bbox_diag(lo_group), vol_err))
+    return out
+
+
+def detect_extrusion(info: "SolidInfo", cfg: MeshConfig) -> Optional[Extrusion]:
+    """면적이 맞고 V ≈ 단면적 × 길이를 만족하는 압출 형상을 고른다."""
+    best: Optional[Extrusion] = None
+    for c in _extrusion_candidates(info, cfg):
+        a_hi = sum(face_area(f) for f in c.far_caps)
+        if abs(c.cap_area - a_hi) / max(c.cap_area, a_hi) > cfg.hex_cap_area_tol:
+            continue
+        if c.vol_err > cfg.extrusion_tol:
+            continue
+        if best is None or c.length > best.length:
+            best = c
     return best
+
+
+def detect_extrusion_forced(info: "SolidInfo", cfg: MeshConfig) -> Optional[Extrusion]:
+    """검증을 건너뛰고 가장 긴 축을 압출 방향으로 삼는다 (강제 모드)."""
+    cands = _extrusion_candidates(info, cfg)
+    return max(cands, key=lambda c: c.length) if cands else None
+
+
+def describe_extrusion_failure(info: "SolidInfo", cfg: MeshConfig) -> str:
+    """왜 압출로 인식되지 않았는지 축별 수치를 요약한다."""
+    cands = _extrusion_candidates(info, cfg)
+    if not cands:
+        return "평행한 끝면 쌍을 가진 축 후보가 없습니다"
+    cands.sort(key=lambda c: c.vol_err)
+    lines = []
+    for c in cands[:3]:
+        a_hi = sum(face_area(f) for f in c.far_caps)
+        da = abs(c.cap_area - a_hi) / max(c.cap_area, a_hi)
+        lines.append(
+            f"축({c.axis[0]:.2f},{c.axis[1]:.2f},{c.axis[2]:.2f}) "
+            f"길이 {c.length:.1f}, 단면 {c.cap_area:.1f}, "
+            f"면적차 {da * 100:.1f}%(허용 {cfg.hex_cap_area_tol * 100:.0f}%), "
+            f"체적오차 {c.vol_err * 100:.1f}%(허용 {cfg.extrusion_tol * 100:.0f}%)"
+        )
+    return " / ".join(lines)
 
 
 # ------------------------------------------------------------------ 자동 분류
