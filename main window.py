@@ -2,6 +2,9 @@
 
 버전 이력
 ---------
+v1.3 (수정본)
+  - 공통 항목에 '면 봉합으로 solid 복원'과 '봉합 허용오차' 추가.
+    겉면만 있는 STEP을 solid로 되살려 압출/사출 메시를 적용하기 위한 옵션.
 v1.2 (수정본)
   - "일괄 유형 변경"이 목록을 고르는 순간 바로 적용되던 것을 고침.
     이제 유형을 고른 뒤 [전체 적용] 버튼을 눌러야 반영된다.
@@ -45,6 +48,8 @@ COMMON_SPEC = [
     ("min_hole_dia", "홀 최소 지름", float, 0.0, 500.0, 0.5, "이보다 작은 원은 무시"),
     ("max_hole_dia", "홀 최대 지름", float, 1.0, 5000.0, 5.0, "이보다 큰 원은 홀로 안 봄"),
     ("scale", "단위 배율", float, 0.001, 1000.0, 1.0, "STEP이 m 단위면 1000"),
+    ("heal_tolerance", "봉합 허용오차", float, 1e-06, 10.0, 0.0001,
+     "면을 꿰맬 때 허용할 틈. 형상의 실제 틈보다 커야 solid이 만들어진다"),
 ]
 SHELL_SPEC = [
     ("shell_max_thickness", "면쌍 최대 두께", float, 0.1, 100.0, 0.5,
@@ -73,6 +78,7 @@ HEX_SPEC = [
      "V ≈ 단면적 × 길이 오차 허용"),
 ]
 CHECK_SPEC = [
+    ("auto_make_solid", "면 봉합으로 solid 복원"),
     ("structured_washer", "정렬 washer 사용"),
     ("shell_quad_dominant", "shell quad 우선"),
     ("shell_imprint", "패치 imprint(절점 공유)"),
@@ -299,7 +305,7 @@ class MainWindow(QMainWindow):
                 w = QDoubleSpinBox()
                 w.setRange(lo, hi)
                 w.setSingleStep(step)
-                w.setDecimals(3)
+                w.setDecimals(6 if step < 0.001 else 3)
             w.setToolTip(tip)
             w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self.widgets[name] = w
