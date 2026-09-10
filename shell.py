@@ -9,6 +9,16 @@ mid-surface는 면쌍 추출 + 벤딩부 연장 + 자동 봉합까지 한 번에
   imprint로 인접 패치를 연결하되, 남은 free edge 수를 리포트한다.
 - 그래도 안 되면 설계팀에서 mid-surface STEP을 받거나 ANSA에서 뽑은 뒤
   이 프로그램의 메시/홀/washer 부분만 쓰는 편이 빠르다.
+
+버전 이력
+---------
+v1.2 (수정본)
+  - solid이 없는 surface 전용 STEP을 그대로 shell 메시하는 mesh_surfaces() 추가.
+    ANSA/설계팀 mid-surface STEP이 여기에 해당한다.
+  - 2D 메시 생성 부분을 _mesh_2d()로 분리해 solid 경로와 공유.
+  - washer로 면이 쪼개져도 두께 그룹이 유지되도록 setup_holes에 meta 전달.
+v1.0
+  - 최초 작성.
 """
 from __future__ import annotations
 
@@ -106,23 +116,8 @@ def build_midsurface(info: g.SolidInfo, cfg: MeshConfig,
                 gmsh.model.occ.remove([(d, t)], recursive=False)
     gmsh.model.occ.synchronize()
 
-    if cfg.shell_imprint and len(mid_tags) > 1:
-        try:
-            out, mapping = gmsh.model.occ.fragment(
-                [(2, mid_tags[0])], [(2, t) for t in mid_tags[1:]]
-            )
-            gmsh.model.occ.synchronize()
-            new_thick: Dict[int, float] = {}
-            for src, children in zip(mid_tags, mapping):
-                for d, t in children:
-                    if d == 2:
-                        new_thick[t] = thickness[src]
-            if new_thick:
-                thickness = new_thick
-                mid_tags = list(new_thick.keys())
-            log(f"  패치 imprint 완료 — 면 {len(mid_tags)}개")
-        except Exception as exc:
-            log(f"  imprint 실패, 개별 패치 유지: {exc}")
+    if cfg.shell_imprint:
+        mid_tags, thickness = imprint_patches(mid_tags, thickness, log)
 
     return mid_tags, thickness
 
@@ -140,10 +135,33 @@ def report_free_edges(log: Logger) -> int:
     return free
 
 
-def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, float]:
-    mid_tags, thickness = build_midsurface(info, cfg, log)
+def imprint_patches(tags: List[int], thickness: Dict[int, float],
+                    log: Logger) -> Tuple[List[int], Dict[int, float]]:
+    """인접 패치끼리 imprint해서 경계에서 절점을 공유하게 만든다."""
+    if len(tags) < 2:
+        return tags, thickness
+    try:
+        out, mapping = gmsh.model.occ.fragment(
+            [(2, tags[0])], [(2, t) for t in tags[1:]]
+        )
+        gmsh.model.occ.synchronize()
+        new_thick: Dict[int, float] = {}
+        for src, children in zip(tags, mapping):
+            for d, t in children:
+                if d == 2:
+                    new_thick[t] = thickness.get(src, 0.0)
+        if new_thick:
+            log(f"  패치 imprint 완료 — 면 {len(new_thick)}개")
+            return list(new_thick.keys()), new_thick
+    except Exception as exc:
+        log(f"  imprint 실패, 개별 패치 유지: {exc}")
+    return tags, thickness
 
-    field = g.setup_holes(mid_tags, cfg, log, structured=True)
+
+def _mesh_2d(tags: List[int], thickness: Dict[int, float],
+             cfg: MeshConfig, log: Logger) -> Dict[str, object]:
+    """홀/washer 처리 후 2D 메시를 만들고 두께별 물리 그룹을 붙인다."""
+    field = g.setup_holes(tags, cfg, log, structured=True, meta=thickness)
     free = report_free_edges(log)
 
     gmsh.option.setNumber("Mesh.MeshSizeMin", cfg.element_size * 0.2)
@@ -169,12 +187,36 @@ def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, float]:
         gmsh.option.setNumber("Mesh.SecondOrderIncomplete", 1)
 
     # 두께별로 물리 그룹을 만들어 두면 *SHELL SECTION 작성이 쉬워진다
+    existing = {t for _, t in gmsh.model.getEntities(2)}
     groups: Dict[float, List[int]] = {}
     for tag, t in thickness.items():
-        groups.setdefault(round(t, 3), []).append(tag)
-    for t, tags in sorted(groups.items()):
-        pg = gmsh.model.addPhysicalGroup(2, tags)
+        if tag in existing:
+            groups.setdefault(round(t, 3), []).append(tag)
+    for t, group_tags in sorted(groups.items()):
+        pg = gmsh.model.addPhysicalGroup(2, group_tags)
         gmsh.model.setPhysicalName(2, pg, f"SHELL_T{t:.2f}".replace(".", "p"))
 
     return {"free_edges": float(free),
             "thickness_groups": {f"{k:.3f}": len(v) for k, v in groups.items()}}
+
+
+def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, object]:
+    """solid에서 mid-surface를 뽑아 shell 메시."""
+    mid_tags, thickness = build_midsurface(info, cfg, log)
+    return _mesh_2d(mid_tags, thickness, cfg, log)
+
+
+def mesh_surfaces(surface_tags: List[int], cfg: MeshConfig,
+                  log: Logger) -> Dict[str, object]:
+    """surface 전용 STEP: 들어온 면 자체를 mid-surface로 보고 shell 메시.
+
+    두께 정보가 파일에 없으므로 shell_default_thickness를 쓴다.
+    해석 전에 *SHELL SECTION의 두께 값만 실제 판 두께로 바꿔주면 된다.
+    """
+    t0 = cfg.shell_default_thickness
+    log(f"  surface {len(surface_tags)}개를 mid-surface로 사용 (두께 {t0} 가정)")
+    thickness: Dict[int, float] = {t: t0 for t in surface_tags}
+    tags = list(surface_tags)
+    if cfg.shell_imprint:
+        tags, thickness = imprint_patches(tags, thickness, log)
+    return _mesh_2d(tags, thickness, cfg, log)
