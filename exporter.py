@@ -3,6 +3,14 @@
 gmsh의 Abaqus writer는 shell 요소를 평면응력(CPS3/CPS4)으로 써버리기 때문에
 그대로 Abaqus에 넣으면 S3/S4R로 안 잡힌다. 여기서 키워드를 치환하고
 두께별 *SHELL SECTION을 붙여 바로 해석에 들어갈 수 있는 상태로 만든다.
+
+버전 이력
+---------
+v1.2 (수정본)
+  - 출력 형식을 inp(Abaqus)와 k(LS-DYNA) 두 가지로 정리.
+    gmsh의 LS-DYNA writer는 .key 확장자만 받으므로 저장 후 .k로 바꾼다.
+v1.0
+  - 최초 작성.
 """
 from __future__ import annotations
 
@@ -33,9 +41,12 @@ def write(base: Path, cfg: MeshConfig, part_type: PartType,
 
     written: List[str] = []
     for fmt in cfg.export_formats:
-        out = base.with_suffix("." + fmt)
         try:
-            gmsh.write(str(out))
+            if fmt == "k":
+                out = _write_dyna(base, log)
+            else:
+                out = base.with_suffix("." + fmt)
+                gmsh.write(str(out))
         except Exception as exc:
             log(f"  [경고] {fmt} 저장 실패: {exc}")
             continue
@@ -44,6 +55,20 @@ def write(base: Path, cfg: MeshConfig, part_type: PartType,
         written.append(str(out))
         log(f"  저장: {out.name}")
     return written
+
+
+def _write_dyna(base: Path, log: Logger) -> Path:
+    """LS-DYNA keyword 파일 저장.
+
+    gmsh는 .key 확장자만 LS-DYNA writer로 인식하므로 그렇게 쓴 뒤 .k로 바꾼다.
+    """
+    tmp = base.with_suffix(".key")
+    gmsh.write(str(tmp))
+    out = base.with_suffix(".k")
+    if out.exists():
+        out.unlink()
+    tmp.rename(out)
+    return out
 
 
 def _fix_inp(path: Path, cfg: MeshConfig, part_type: PartType,
