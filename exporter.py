@@ -74,7 +74,7 @@ def _write_dyna(base: Path, log: Logger) -> Path:
 def _fix_inp(path: Path, cfg: MeshConfig, part_type: PartType,
              thickness_groups: Dict[str, int], log: Logger) -> None:
     text = path.read_text(encoding="utf-8", errors="ignore")
-    mapping = SHELL_MAP if part_type is PartType.PRESS else SOLID_MAP
+    mapping = SHELL_MAP if part_type == PartType.PRESS else SOLID_MAP
     swapped = 0
     for src, dst in mapping.items():
         needle = f"type={src}"
@@ -87,7 +87,7 @@ def _fix_inp(path: Path, cfg: MeshConfig, part_type: PartType,
             text = text.replace(needle_u, f"TYPE={dst}")
 
     lines = [text.rstrip("\n")]
-    if part_type is PartType.PRESS and cfg.write_sections and thickness_groups:
+    if part_type == PartType.PRESS and cfg.write_sections and thickness_groups:
         lines.append("**")
         lines.append("** 두께별 shell section — MATERIAL 이름만 맞춰서 쓰면 된다")
         for t_str in sorted(thickness_groups):
@@ -96,7 +96,7 @@ def _fix_inp(path: Path, cfg: MeshConfig, part_type: PartType,
             lines.append(f"*SHELL SECTION, ELSET={elset}, MATERIAL=MAT_STEEL")
             lines.append(f"{t:.4f}, 5")
     elif part_type in (PartType.INJECTION, PartType.EXTRUSION) and cfg.write_sections:
-        elset = "SOLID_TET" if part_type is PartType.INJECTION else "SOLID_HEX"
+        elset = "SOLID_TET" if part_type == PartType.INJECTION else "SOLID_HEX"
         lines.append("**")
         lines.append(f"*SOLID SECTION, ELSET={elset}, MATERIAL=MAT_1")
         lines.append(",")
