@@ -1,4 +1,15 @@
-"""메인 윈도우. 파일 목록 + 파라미터 + 로그, 메시 생성은 워커 스레드에서 돈다."""
+"""메인 윈도우. 파일 목록 + 파라미터 + 로그, 메시 생성은 워커 스레드에서 돈다.
+
+버전 이력
+---------
+v1.2 (수정본)
+  - "일괄 유형 변경"이 목록을 고르는 순간 바로 적용되던 것을 고침.
+    이제 유형을 고른 뒤 [전체 적용] 버튼을 눌러야 반영된다.
+  - 출력 형식을 inp(Abaqus)와 k(LS-DYNA) 두 가지로 정리.
+  - surface 전용 STEP에서 쓸 기본 판 두께 입력란 추가.
+v1.0
+  - 최초 작성.
+"""
 from __future__ import annotations
 
 import os
@@ -42,6 +53,8 @@ SHELL_SPEC = [
      "면쌍 판정 시 면적 차이 허용 비율"),
     ("thin_thickness_max", "박판 판정 두께", float, 0.1, 100.0, 0.5,
      "자동 판정에서 이 등가두께 이하면 프레스로 봄"),
+    ("shell_default_thickness", "기본 판 두께", float, 0.01, 100.0, 0.1,
+     "solid 없이 면만 있는 STEP에서 SECTION에 쓸 두께"),
 ]
 TET_SPEC = [
     ("tet_min_size_factor", "최소 크기 비율", float, 0.02, 1.0, 0.05,
@@ -68,7 +81,8 @@ CHECK_SPEC = [
     ("optimize", "메시 최적화"),
     ("write_sections", "SECTION 자동 작성"),
 ]
-FORMATS = ["inp", "msh", "nas", "vtk", "stl"]
+# 체크박스에 쓸 이름: 내부 형식 키 -> 표시 문구
+FORMATS = {"inp": "inp (Abaqus)", "k": "k (LS-DYNA)"}
 
 
 def card(title: str) -> Tuple[QFrame, QVBoxLayout]:
@@ -188,14 +202,18 @@ class MainWindow(QMainWindow):
         clr = QPushButton("비우기")
         clr.setObjectName("Danger")
         clr.clicked.connect(lambda: self.table.setRowCount(0))
-        allc = QComboBox()
-        allc.addItems(["일괄 유형 변경"] + [p.label for p in PartType])
-        allc.currentIndexChanged.connect(self._bulk_type)
-        self.bulk = allc
+        self.bulk = QComboBox()
+        for pt in PartType:
+            self.bulk.addItem(pt.label, pt)
+        self.bulk.setToolTip("적용할 파트 유형을 고른 뒤 [전체 적용]을 누르세요")
+        apply_all = QPushButton("전체 적용")
+        apply_all.setToolTip("목록의 모든 파트를 왼쪽에서 고른 유형으로 바꿉니다")
+        apply_all.clicked.connect(self._bulk_type)
         for w in (add, rem, clr):
             btns.addWidget(w)
         btns.addStretch(1)
-        btns.addWidget(allc)
+        btns.addWidget(self.bulk)
+        btns.addWidget(apply_all)
         inner.addLayout(btns)
         lay.addWidget(box, 1)
 
@@ -213,10 +231,10 @@ class MainWindow(QMainWindow):
 
         fmt = QHBoxLayout()
         fmt.addWidget(QLabel("형식"))
-        for f in FORMATS:
-            cb = QCheckBox(f)
-            cb.setChecked(f == "inp")
-            self.format_boxes[f] = cb
+        for key, label in FORMATS.items():
+            cb = QCheckBox(label)
+            cb.setChecked(key == "inp")
+            self.format_boxes[key] = cb
             fmt.addWidget(cb)
         fmt.addStretch(1)
         out_lay.addLayout(fmt)
@@ -364,15 +382,17 @@ class MainWindow(QMainWindow):
         for r in sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True):
             self.table.removeRow(r)
 
-    def _bulk_type(self, idx: int) -> None:
-        if idx <= 0:
+    def _bulk_type(self) -> None:
+        """[전체 적용] 버튼: 목록의 모든 행을 선택한 유형으로 바꾼다."""
+        target = self.bulk.currentData()
+        if target is None or self.table.rowCount() == 0:
             return
-        target = list(PartType)[idx - 1]
         for r in range(self.table.rowCount()):
             combo = self.table.cellWidget(r, 1)
             if isinstance(combo, QComboBox):
                 combo.setCurrentIndex(combo.findData(target))
-        self.bulk.setCurrentIndex(0)
+        self.append_log(f"전체 {self.table.rowCount()}개 파트를 "
+                        f"'{target.label}'으로 변경")
 
     def pick_outdir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "출력 폴더", self.outdir.text())
