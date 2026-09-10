@@ -7,6 +7,8 @@ tetra에는 정렬 washer 링을 만들 수 없어 홀 처리는
 
 버전 이력
 ---------
+v1.5 (수정본)
+  - 진행 단계 콜백(stage) 지원.
 v1.3 (수정본)
   - 메시 생성을 generate_mesh()로 통일 (재조합 실패 자동 복구).
 v1.0
@@ -14,7 +16,7 @@ v1.0
 """
 from __future__ import annotations
 
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import gmsh
 
@@ -22,9 +24,13 @@ from . import geometry as g
 from .config import MeshConfig
 
 Logger = Callable[[str], None]
+Stage = Optional[Callable[[float, str], None]]
 
 
-def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, float]:
+def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger,
+         stage: Stage = None) -> Dict[str, float]:
+    if stage:
+        stage(0.20, "홀 처리")
     field = g.setup_holes(info.faces, cfg, log, structured=False)
 
     gmsh.option.setNumber("Mesh.MeshSizeMin", cfg.min_size())
@@ -40,8 +46,12 @@ def mesh(info: g.SolidInfo, cfg: MeshConfig, log: Logger) -> Dict[str, float]:
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", cfg.tet_curvature_nodes)
 
     log(f"  tetra 생성 (size {cfg.element_size}, min {cfg.min_size():.2f})")
+    if stage:
+        stage(0.40, "메시 생성")
     g.generate_mesh(3, log)
 
+    if stage:
+        stage(0.75, "최적화")
     if cfg.optimize:
         gmsh.model.mesh.optimize("Netgen")
         gmsh.model.mesh.optimize("HighOrderFast" if cfg.second_order else "Laplace2D")
