@@ -2,6 +2,9 @@
 
 버전 이력
 ---------
+v1.5 (수정본)
+  - 진행률을 파일 단위가 아니라 단계 단위로 보고한다(stage 콜백).
+    파트 하나만 돌려도 진행 바가 단계에 따라 올라간다.
 v1.4 (수정본)
   - 넘어온 파트 유형을 PartType.coerce()로 정규화. GUI에서 고른 유형이
     무시되고 tetra로 처리되던 원인.
@@ -29,6 +32,13 @@ from . import exporter, geometry as g, hexa, shell, tetra
 from .config import MeshConfig, PartType
 
 Logger = Callable[[str], None]
+Stage = Optional[Callable[[float, str], None]]
+
+# 단계별 가중치의 기준점. 메시 생성 전후로 진행률을 나눠 보고한다.
+STAGE_LOAD = 0.02
+STAGE_MESH_DONE = 0.85
+STAGE_QUALITY = 0.90
+STAGE_EXPORT = 0.96
 
 ELEMENT_NAMES = {
     1: "line2", 2: "tri3", 3: "quad4", 4: "tet4", 5: "hex8", 6: "prism6",
@@ -108,7 +118,7 @@ def _isolate(solid_tag: int) -> None:
 
 
 def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
-             outdir: str, log: Logger) -> List[Result]:
+             outdir: str, log: Logger, stage: Stage = None) -> List[Result]:
     requested = PartType.coerce(requested)
     src = Path(step_path)
     out_root = Path(outdir)
@@ -135,14 +145,23 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
                 error=(f"{requested.label}은 solid이 필요한데 이 STEP에서 solid을 "
                        "만들지 못했습니다. '면 봉합으로 solid 복원'이 켜져 있는지, "
                        "'봉합 허용오차'가 형상의 틈보다 큰지 확인하세요"))]
-        return [_run_surface_only(src, cfg, out_root, log)]
+        return [_run_surface_only(src, cfg, out_root, log, stage)]
 
     for idx, solid in enumerate(solids, start=1):
         name = src.stem if n_solids == 1 else f"{src.stem}_p{idx:02d}"
         res = Result(str(src), name, requested)
         log(f"[{name}] 처리 시작")
         t_start = time.perf_counter()
+
+        base = idx - 1
+
+        def report(frac: float, text: str) -> None:
+            """파트 내부 진행률(0~1)을 전체 진행률로 환산해 올린다."""
+            if stage is not None:
+                stage((base + min(max(frac, 0.0), 1.0)) / n_solids, text)
+
         try:
+            report(STAGE_LOAD, "STEP 로드")
             g.start()
             g.load_step(str(src), cfg, lambda _m: None)
             _isolate(solid)
@@ -156,22 +175,31 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
             res.part_type = part_type
 
             log(f"  적용 유형: {part_type.label}")
+
+            def sub_stage(frac: float, text: str) -> None:
+                # 메시 모듈의 0~1 진행을 로드 이후 ~ 메시 완료 구간에 매핑
+                span = STAGE_MESH_DONE - STAGE_LOAD
+                report(STAGE_LOAD + frac * span, text)
+
             if part_type == PartType.PRESS:
-                extra = shell.mesh(info, cfg, log)
+                extra = shell.mesh(info, cfg, log, sub_stage)
             elif part_type == PartType.EXTRUSION:
-                extra = hexa.mesh(info, cfg, log)
+                extra = hexa.mesh(info, cfg, log, sub_stage)
             else:
-                extra = tetra.mesh(info, cfg, log)
+                extra = tetra.mesh(info, cfg, log, sub_stage)
             res.extra = extra
 
+            report(STAGE_QUALITY, "품질 평가")
             node_tags, _, _ = gmsh.model.mesh.getNodes()
             res.nodes = len(node_tags)
             res.elements = _count_elements()
             res.quality_min, res.quality_avg, res.quality_bad = _quality(cfg)
 
+            report(STAGE_EXPORT, "저장")
             groups = extra.get("thickness_groups") or {}
             res.files = exporter.write(out_root / name, cfg, part_type,
                                        groups if isinstance(groups, dict) else {}, log)
+            report(1.0, "완료")
             res.seconds = time.perf_counter() - t_start
             log(f"  완료 — {res.summary()}")
         except Exception as exc:
@@ -187,7 +215,7 @@ def run_file(step_path: str, requested: PartType, cfg: MeshConfig,
 
 
 def _run_surface_only(src: Path, cfg: MeshConfig, out_root: Path,
-                      log: Logger) -> Result:
+                      log: Logger, stage: Stage = None) -> Result:
     """solid 없이 면만 들어있는 STEP (mid-surface STEP) 처리."""
     name = src.stem
     res = Result(str(src), name, PartType.PRESS,
@@ -196,7 +224,12 @@ def _run_surface_only(src: Path, cfg: MeshConfig, out_root: Path,
     try:
         g.start()
         _, surfaces = g.load_shapes(str(src), cfg, lambda _m: None)
-        extra = shell.mesh_surfaces(surfaces, cfg, log)
+
+        def sub_stage(frac: float, text: str) -> None:
+            if stage is not None:
+                stage(STAGE_LOAD + frac * (STAGE_MESH_DONE - STAGE_LOAD), text)
+
+        extra = shell.mesh_surfaces(surfaces, cfg, log, sub_stage)
         res.extra = extra
 
         node_tags, _, _ = gmsh.model.mesh.getNodes()
@@ -207,6 +240,8 @@ def _run_surface_only(src: Path, cfg: MeshConfig, out_root: Path,
         groups = extra.get("thickness_groups") or {}
         res.files = exporter.write(out_root / name, cfg, PartType.PRESS,
                                    groups if isinstance(groups, dict) else {}, log)
+        if stage is not None:
+            stage(1.0, "완료")
         log(f"  완료 — {res.summary()}")
     except Exception as exc:
         res.error = str(exc)
@@ -219,14 +254,24 @@ def _run_surface_only(src: Path, cfg: MeshConfig, out_root: Path,
 
 def run_batch(items: List[tuple[str, PartType]], cfg: MeshConfig, outdir: str,
               log: Logger, progress: Optional[Callable[[int, int], None]] = None,
-              should_stop: Optional[Callable[[], bool]] = None) -> List[Result]:
+              should_stop: Optional[Callable[[], bool]] = None,
+              stage: Stage = None) -> List[Result]:
+    """여러 파일을 순서대로 처리.
+
+    stage 콜백은 (0~1 전체 진행률, 현재 단계 이름)을 받는다.
+    """
     all_res: List[Result] = []
     total = len(items)
     for i, (path, ptype) in enumerate(items):
         if should_stop is not None and should_stop():
             log("사용자 중단")
             break
-        all_res.extend(run_file(path, ptype, cfg, outdir, log))
+
+        def file_stage(frac: float, text: str, _i=i) -> None:
+            if stage is not None:
+                stage((_i + frac) / total, text)
+
+        all_res.extend(run_file(path, ptype, cfg, outdir, log, file_stage))
         if progress is not None:
             progress(i + 1, total)
     return all_res
