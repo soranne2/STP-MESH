@@ -2,6 +2,10 @@
 
 버전 이력
 ---------
+v1.4 (수정본)
+  - PartType.coerce() 추가. PartType이 str Enum이라 Qt 위젯을 거치면
+    평범한 str로 돌아오고, 그러면 'is PartType.EXTRUSION' 비교가 전부
+    False가 되어 무조건 tetra로 빠지는 문제가 있었다.
 v1.3 (수정본)
   - auto_make_solid 추가. 겉면 surface만 들어있는 STEP을 sew/heal해서
     solid로 복원한다. 이게 되어야 압출 hexa나 tetra를 적용할 수 있다.
@@ -27,6 +31,20 @@ class PartType(str, Enum):
     PRESS = "press"          # 얇은 프레스 -> mid-surface shell
     INJECTION = "injection"  # 복잡한 사출 -> tetra solid
     EXTRUSION = "extrusion"  # 압출 -> 두께방향 layer hexa
+
+    @classmethod
+    def coerce(cls, value) -> "PartType":
+        """문자열이든 Enum이든 PartType으로 정규화.
+
+        PartType은 str을 상속하므로 Qt를 거치면 평범한 str로 돌아온다.
+        경계에서 반드시 이 함수를 통과시켜야 한다.
+        """
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value))
+        except ValueError:
+            return cls.AUTO
 
     @property
     def label(self) -> str:
